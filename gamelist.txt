@@ -1,1 +1,26 @@
-
+[
+  {
+    "name": "Animal Hospital",
+    "placeId": 78515283254292
+  },
+  {
+    "name": "Forsaken",
+    "placeId": 18687417158
+  },
+  {
+    "name": "Jujutsu Shenanigans",
+    "placeId": 9391468976
+  },
+  {
+    "name": "RIVALS",
+    "placeId": 17625359962
+  },
+  {
+    "name": "99 Nights in the Forest",
+    "placeId": 79546208627805
+  },
+  {
+    "name": "Fisch",
+    "placeId": 16732694052
+  }
+]
