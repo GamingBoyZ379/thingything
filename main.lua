@@ -3,7 +3,7 @@ local TeleportService = game:GetService("TeleportService")
 
 local CONFIG = {
     GamesURL = "https://raw.githubusercontent.com/GamingBoyZ379/thingything/main/games.json",
-    ScriptURL = "https://raw.githubusercontent.com/GamingBoyZ379/thingything/main/monitor.lua", -- host this script here
+ScriptURL = "https://raw.githubusercontent.com/GamingBoyZ379/thingything/main/main.lua",
     CheckInterval = 300,
     RequestDelay = 1,
     LoadWait = 15,      -- seconds to let the place stream in before saving
