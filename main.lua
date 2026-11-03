@@ -1,221 +1,160 @@
-
 local HttpService = game:GetService("HttpService")
+local TeleportService = game:GetService("TeleportService")
 
 local CONFIG = {
-    GitHubURL = "https://raw.githubusercontent.com/GamingBoyZ379/thingything/main/games.json",
+    GamesURL = "https://raw.githubusercontent.com/GamingBoyZ379/thingything/main/games.json",
+    ScriptURL = "https://raw.githubusercontent.com/GamingBoyZ379/thingything/main/monitor.lua", -- host this script here
     CheckInterval = 300,
-    RequestDelay = 2,
-    SaveDirectory = "SavedInstances",
-    SaveFile = "SavedInstances/update_history.json"
+    RequestDelay = 1,
+    LoadWait = 15,      -- seconds to let the place stream in before saving
+    MaxAttempts = 3,
+    Dir = "SavedInstances",
+    StateFile = "SavedInstances/state.json",
 }
 
-local function log(message)
-    print("[UpdateMonitor] " .. message)
+local function log(msg) print("[UpdateMonitor] " .. msg) end
+
+local function fetchJson(url, label)
+    local ok, body = pcall(game.HttpGet, game, url)
+    if not ok then warn("[UpdateMonitor] " .. label .. " failed: " .. tostring(body)) return nil end
+    local ok2, data = pcall(HttpService.JSONDecode, HttpService, body)
+    if not ok2 then warn("[UpdateMonitor] " .. label .. " bad JSON") return nil end
+    return data
 end
 
-local function loadHistory()
-    log("Loading timestamp history...")
-
-    if not isfile(CONFIG.SaveFile) then
-        log("No history found. Starting fresh.")
-        return {}
-    end
-
-    local success, result = pcall(function()
-        return HttpService:JSONDecode(readfile(CONFIG.SaveFile))
-    end)
-
-    if not success or type(result) ~= "table" then
-        warn("[UpdateMonitor] Could not load history.")
-        return nil
-    end
-
-    log("Loaded " .. tostring(#result) .. " history entries.")
-    return result
-end
-
-local function saveHistory(history)
-    log("Writing timestamp history...")
-
-    local success, err = pcall(function()
-        writefile(CONFIG.SaveFile, HttpService:JSONEncode(history))
-    end)
-
-    if not success then
-        warn("[UpdateMonitor] History write failed: " .. tostring(err))
-        return false
-    end
-
-    log("History saved successfully.")
-    return true
-end
-
-local function request(url, description)
-    log("REQUEST: " .. description)
-
-    local success, result = pcall(function()
-        return game:HttpGet(url)
-    end)
-
-    if not success then
-        warn("[UpdateMonitor] Request failed: " .. tostring(result))
-        return nil
-    end
-
-    log("REQUEST SUCCESS: " .. description)
-    return result
-end
-
-local function getUniverseId(placeId)
-    log("Resolving PlaceId: " .. tostring(placeId))
-
-    local result = request(
-        "https://apis.roblox.com/universes/v1/places/"
-        .. tostring(placeId) .. "/universe",
-        "UniverseId lookup"
-    )
-
-    if not result then return nil end
-
-    local success, data = pcall(function()
-        return HttpService:JSONDecode(result)
-    end)
-
-    if not success or not data.universeId then
-        warn("[UpdateMonitor] Invalid UniverseId response.")
-        return nil
-    end
-
-    log("UniverseId: " .. tostring(data.universeId))
-    return tostring(data.universeId)
-end
-
-local function getUpdate(universeId)
-    log("Checking UniverseId: " .. universeId)
-
-    local result = request(
-        "https://games.roblox.com/v1/games?universeIds="
-        .. universeId,
-        "Experience update lookup"
-    )
-
-    if not result then return nil end
-
-    local success, data = pcall(function()
-        return HttpService:JSONDecode(result)
-    end)
-
-    if not success or not data.data or not data.data[1] then
-        warn("[UpdateMonitor] No experience information returned.")
-        return nil
-    end
-
-    return data.data[1].updated
-end
-
-local function parseTimestamp(value)
-    if type(value) ~= "string" then
-        return nil
-    end
-
-    local success, date = pcall(function()
-        return DateTime.fromIsoDate(value)
-    end)
-
-    if not success or not date then
-        return nil
-    end
-
-    return date.UnixTimestampMillis
-end
-
-local function checkGames()
-    log("========================================")
-    log("Starting GitHub refresh")
-
-    local result = request(CONFIG.GitHubURL, "Downloading games.json")
-    if not result then return end
-
-    local success, games = pcall(function()
-        return HttpService:JSONDecode(result)
-    end)
-
-    if not success or type(games) ~= "table" then
-        warn("[UpdateMonitor] Invalid GitHub JSON.")
-        return
-    end
-
-    log("Found " .. #games .. " games.")
-
-    local history = loadHistory()
-    if not history then return end
-
-    for index, gameInfo in ipairs(games) do
-        log("----------------------------------------")
-        log("GAME " .. index .. "/" .. #games)
-        log("Name: " .. tostring(gameInfo.name))
-
-        if not gameInfo.placeId then
-            warn("[UpdateMonitor] Missing PlaceId.")
-            continue
-        end
-
-        local universeId = getUniverseId(gameInfo.placeId)
-        if not universeId then
-            log("Skipping: UniverseId unavailable.")
-            continue
-        end
-
-        local updated = getUpdate(universeId)
-        if not updated then
-            log("Skipping: Update timestamp unavailable.")
-            continue
-        end
-
-        local previous = history[universeId]
-
-        if not previous then
-            log("NEW: No previously recorded archive.")
-            log("Current update: " .. updated)
-            log("Needs archive: YES")
-
+-- state = { archived = {[universeId] = updated}, attempts = {[universeId] = n}, universes = {[placeId] = universeId} }
+local function loadState()
+    local state = { archived = {}, attempts = {}, universes = {} }
+    if isfile(CONFIG.StateFile) then
+        local ok, data = pcall(function() return HttpService:JSONDecode(readfile(CONFIG.StateFile)) end)
+        if ok and type(data) == "table" then
+            for k in pairs(state) do state[k] = data[k] or state[k] end
         else
-            local currentTime = parseTimestamp(updated)
-            local previousTime = parseTimestamp(previous)
+            warn("[UpdateMonitor] State unreadable, starting fresh.")
+        end
+    end
+    return state
+end
 
-            if not currentTime or not previousTime then
-                warn("[UpdateMonitor] Invalid timestamp. Skipping comparison.")
+local function saveState(state)
+    local ok, err = pcall(writefile, CONFIG.StateFile, HttpService:JSONEncode(state))
+    if not ok then warn("[UpdateMonitor] State write failed: " .. tostring(err)) end
+end
 
-            elseif currentTime > previousTime then
-                log("UPDATE DETECTED!")
-                log("Previous: " .. previous)
-                log("Current: " .. updated)
-                log("Needs archive: YES")
+local function toMillis(iso)
+    local ok, dt = pcall(DateTime.fromIsoDate, iso)
+    return ok and dt and dt.UnixTimestampMillis or nil
+end
 
-            else
-                log("UNCHANGED: No newer update.")
-                log("Needs archive: NO")
+local function getUniverseId(state, placeId)
+    local key = tostring(placeId)
+    if state.universes[key] then return state.universes[key] end
+
+    local data = fetchJson("https://apis.roblox.com/universes/v1/places/" .. key .. "/universe", "Universe lookup")
+    if data and data.universeId then
+        state.universes[key] = tostring(data.universeId)
+        task.wait(CONFIG.RequestDelay)
+        return state.universes[key]
+    end
+end
+
+local function needsArchive(state, universeId, updated)
+    local prev = state.archived[universeId]
+    if not prev then return true end
+    local a, b = toMillis(updated), toMillis(prev)
+    return a ~= nil and b ~= nil and a > b
+end
+
+local function findPending(state)
+    local games = fetchJson(CONFIG.GamesURL, "games.json")
+    if type(games) ~= "table" then return {} end
+
+    local entries, ids = {}, {}
+    for _, g in ipairs(games) do
+        if g.placeId then
+            local uid = getUniverseId(state, g.placeId)
+            if uid then
+                entries[uid] = { name = g.name or uid, placeId = g.placeId, universeId = uid }
+                table.insert(ids, uid)
             end
         end
+    end
 
+    local pending = {}
+    -- batch update lookup, 50 ids per request
+    for i = 1, #ids, 50 do
+        local chunk = table.concat(ids, ",", i, math.min(i + 49, #ids))
+        local data = fetchJson("https://games.roblox.com/v1/games?universeIds=" .. chunk, "Update lookup")
+        if data and data.data then
+            for _, info in ipairs(data.data) do
+                local e = entries[tostring(info.id)]
+                if e and needsArchive(state, e.universeId, info.updated) then
+                    e.updated = info.updated
+                    table.insert(pending, e)
+                end
+            end
+        end
         task.wait(CONFIG.RequestDelay)
     end
-
-    log("Finished checking all games.")
-    log("========================================")
+    return pending
 end
 
-if not isfolder(CONFIG.SaveDirectory) then
-    makefolder(CONFIG.SaveDirectory)
+local function archive(state, entry)
+    state.attempts[entry.universeId] = (state.attempts[entry.universeId] or 0) + 1
+    saveState(state) -- persist the attempt before the risky part
+
+    log("Archiving " .. entry.name)
+    if not game:IsLoaded() then game.Loaded:Wait() end
+    task.wait(CONFIG.LoadWait)
+
+    local safeName = entry.name:gsub("[^%w%-_ ]", "")
+    local ok, err = pcall(saveinstance, {
+        FileName = ("%s/%s_%s_%s"):format(CONFIG.Dir, safeName, entry.universeId, os.date("%Y%m%d")),
+    })
+
+    if ok then
+        state.archived[entry.universeId] = entry.updated
+        state.attempts[entry.universeId] = nil
+        log("Archived " .. entry.name)
+    else
+        warn("[UpdateMonitor] saveinstance failed: " .. tostring(err))
+    end
+    saveState(state)
 end
 
-while true do
-    local success, err = pcall(checkGames)
+local function cycle()
+    local state = loadState()
+    local pending = findPending(state)
+    saveState(state) -- keeps the universe cache
 
-    if not success then
-        warn("[UpdateMonitor] Cycle error: " .. tostring(err))
+    log(#pending .. " game(s) need archiving.")
+
+    -- archive the current place if it's pending
+    for _, e in ipairs(pending) do
+        if tostring(game.GameId) == e.universeId then
+            archive(state, e)
+            return
+        end
     end
 
-    log("Next check in " .. CONFIG.CheckInterval .. " seconds.")
+    -- otherwise hop to the next one
+    for _, e in ipairs(pending) do
+        if (state.attempts[e.universeId] or 0) < CONFIG.MaxAttempts then
+            state.attempts[e.universeId] = (state.attempts[e.universeId] or 0) + 1
+            saveState(state)
+            log("Teleporting to " .. e.name)
+            queue_on_teleport(('loadstring(game:HttpGet("%s"))()'):format(CONFIG.ScriptURL))
+            TeleportService:Teleport(e.placeId)
+            task.wait(30) -- teleport kills the script; this just stops the loop racing it
+            return
+        end
+    end
+end
+
+if not isfolder(CONFIG.Dir) then makefolder(CONFIG.Dir) end
+
+while true do
+    local ok, err = pcall(cycle)
+    if not ok then warn("[UpdateMonitor] Cycle error: " .. tostring(err)) end
     task.wait(CONFIG.CheckInterval)
 end
