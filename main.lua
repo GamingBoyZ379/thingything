@@ -12,11 +12,15 @@ local CONFIG = {
     CheckInterval = 30,
     RequestDelay = 1,
     LoadWait = 15,      -- seconds to let the place stream in before saving
-    MaxAttempts = 2,
+    MaxAttempts = 3,
     Dir = "SavedInstances",
     StateFile = "SavedInstances/state.json",
     NextFile = "SavedInstances/next.txt", -- read by the external launcher
 }
+
+-- TeleportInitFailed result names (from memory, unknown names just stop retrying)
+local TRANSIENT = { Flooded = true, IsTeleporting = true, GameFull = true, Failure = true, Timeout = true }
+local PERMANENT = { Unauthorized = true, GameNotFound = true, GameEnded = true }
 
 local function log(msg) print("[UpdateMonitor] " .. msg) end
 
@@ -212,6 +216,28 @@ local function archive(state, entry)
     return saved
 end
 
+-- returns the failure name; a successful teleport kills the script, so returning always means it failed
+local function tryTeleport(entry)
+    local result, message
+    local conn = TeleportService.TeleportInitFailed:Connect(function(_, res, msg, placeId)
+        if tostring(placeId) == tostring(entry.placeId) then
+            result, message = res.Name, msg
+        end
+    end)
+
+    clear_teleport_queue() -- avoid stacked copies on retries
+    queue_on_teleport(('loadstring(game:HttpGet("%s", true))()'):format(CONFIG.ScriptURL))
+    pcall(TeleportService.Teleport, TeleportService, entry.placeId)
+
+    local waited = 0
+    while not result and waited < 30 do
+        task.wait(0.5)
+        waited += 0.5
+    end
+    conn:Disconnect()
+    return result or "Timeout", message
+end
+
 -- returns true if it archived something (so the main loop can continue immediately)
 local function cycle()
     local state = loadState()
@@ -238,16 +264,25 @@ local function cycle()
             if e.universeId == tostring(game.GameId) then
                 -- same experience: a normal teleport works
                 log("Teleporting to " .. e.name)
-                clear_teleport_queue() -- avoid stacked copies if a previous teleport failed
-                queue_on_teleport(('loadstring(game:HttpGet("%s", true))()'):format(CONFIG.ScriptURL))
-                TeleportService:Teleport(e.placeId)
+                for i = 1, 3 do
+                    local result, message = tryTeleport(e)
+                    warn(("[UpdateMonitor] Teleport to %s failed (%s): %s"):format(e.name, result, tostring(message)))
+
+                    if PERMANENT[result] then
+                        state.attempts[e.key] = CONFIG.MaxAttempts -- don't bother again
+                        saveState(state)
+                        break
+                    end
+                    if not TRANSIENT[result] then break end
+                    task.wait(5 * i) -- back off: 5s, 10s, 15s
+                end
             else
                 -- different creator: hand off to the external launcher
                 log("Requesting launch of " .. e.name .. " (" .. e.placeId .. ")")
                 writefile(CONFIG.NextFile, tostring(e.placeId))
+                task.wait(60) -- launcher should kill this client well before this ends
             end
 
-            task.wait(60) -- teleport/launcher should kill this client well before this ends
             return false
         end
     end
