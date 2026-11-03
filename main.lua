@@ -1,3 +1,7 @@
+-- prevent double-running if autoexec and queue_on_teleport both fire
+if _G.__UpdateMonitorRunning then return end
+_G.__UpdateMonitorRunning = true
+
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local AssetService = game:GetService("AssetService")
@@ -5,12 +9,13 @@ local AssetService = game:GetService("AssetService")
 local CONFIG = {
     GamesURL = "https://raw.githubusercontent.com/GamingBoyZ379/thingything/main/games.json",
     ScriptURL = "https://raw.githubusercontent.com/GamingBoyZ379/thingything/main/main.lua",
-    CheckInterval = 30,
+    CheckInterval = 300,
     RequestDelay = 1,
     LoadWait = 15,      -- seconds to let the place stream in before saving
-    MaxAttempts = 2,
+    MaxAttempts = 3,
     Dir = "SavedInstances",
     StateFile = "SavedInstances/state.json",
+    NextFile = "SavedInstances/next.txt", -- read by the external launcher
 }
 
 local function log(msg) print("[UpdateMonitor] " .. msg) end
@@ -224,16 +229,25 @@ local function cycle()
         end
     end
 
-    -- otherwise hop to the next one
+    -- otherwise move to the next one
     for _, e in ipairs(pending) do
         if (state.attempts[e.key] or 0) < CONFIG.MaxAttempts then
             state.attempts[e.key] = (state.attempts[e.key] or 0) + 1
             saveState(state)
-            log("Teleporting to " .. e.name)
-            clear_teleport_queue() -- avoid stacked copies if a previous teleport failed
-            queue_on_teleport(('loadstring(game:HttpGet("%s", true))()'):format(CONFIG.ScriptURL))
-            TeleportService:Teleport(e.placeId)
-            task.wait(30) -- teleport kills the script; this just stops the loop racing it
+
+            if e.universeId == tostring(game.GameId) then
+                -- same experience: a normal teleport works
+                log("Teleporting to " .. e.name)
+                clear_teleport_queue() -- avoid stacked copies if a previous teleport failed
+                queue_on_teleport(('loadstring(game:HttpGet("%s", true))()'):format(CONFIG.ScriptURL))
+                TeleportService:Teleport(e.placeId)
+            else
+                -- different creator: hand off to the external launcher
+                log("Requesting launch of " .. e.name .. " (" .. e.placeId .. ")")
+                writefile(CONFIG.NextFile, tostring(e.placeId))
+            end
+
+            task.wait(60) -- teleport/launcher should kill this client well before this ends
             return false
         end
     end
