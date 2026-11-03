@@ -1,5 +1,6 @@
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
+local AssetService = game:GetService("AssetService")
 
 local CONFIG = {
     GamesURL = "https://raw.githubusercontent.com/GamingBoyZ379/thingything/main/games.json",
@@ -22,9 +23,14 @@ local function fetchJson(url, label)
     return data
 end
 
--- state = { archived = {[placeId] = updated}, attempts = {[placeId] = n}, universes = {[rootPlaceId] = universeId} }
+-- state = {
+--   archived  = {[placeId] = updated},
+--   attempts  = {[placeId] = n},
+--   universes = {[rootPlaceId] = universeId},
+--   places    = {[universeId] = { {id=, name=}, ... }},  -- from GetGamePlacesAsync
+-- }
 local function loadState()
-    local state = { archived = {}, attempts = {}, universes = {} }
+    local state = { archived = {}, attempts = {}, universes = {}, places = {} }
     if isfile(CONFIG.StateFile) then
         local ok, data = pcall(function() return HttpService:JSONDecode(readfile(CONFIG.StateFile)) end)
         if ok and type(data) == "table" then
@@ -46,6 +52,24 @@ local function toMillis(iso)
     return ok and dt and dt.UnixTimestampMillis or nil
 end
 
+-- cache every place of the game we're currently in
+local function enumeratePlaces(state)
+    local ok, err = pcall(function()
+        local pages = AssetService:GetGamePlacesAsync()
+        local list = {}
+        while true do
+            for _, p in ipairs(pages:GetCurrentPage()) do
+                table.insert(list, { id = p.PlaceId, name = p.Name })
+            end
+            if pages.IsFinished then break end
+            pages:AdvanceToNextPageAsync()
+        end
+        state.places[tostring(game.GameId)] = list
+        log("Cached " .. #list .. " place(s) for universe " .. tostring(game.GameId))
+    end)
+    if not ok then warn("[UpdateMonitor] GetGamePlacesAsync failed: " .. tostring(err)) end
+end
+
 local function getUniverseId(state, placeId)
     local key = tostring(placeId)
     if state.universes[key] then return state.universes[key] end
@@ -56,28 +80,6 @@ local function getUniverseId(state, placeId)
         task.wait(CONFIG.RequestDelay)
         return state.universes[key]
     end
-end
-
--- all places (root + subplaces) in a universe; falls back to the listed place if the lookup fails
-local function getPlaces(universeId, fallbackPlaceId)
-    local places, cursor = {}, nil
-    repeat
-        local url = ("https://develop.roblox.com/v1/universes/%s/places?limit=100&sortOrder=Asc"):format(universeId)
-        if cursor then url = url .. "&cursor=" .. cursor end
-        local data = fetchJson(url, "Places lookup")
-        task.wait(CONFIG.RequestDelay)
-        if not (data and type(data.data) == "table") then break end
-        for _, p in ipairs(data.data) do
-            table.insert(places, { id = p.id, name = p.name or tostring(p.id) })
-        end
-        cursor = data.nextPageCursor
-    until not cursor
-
-    if #places == 0 then
-        warn("[UpdateMonitor] No places returned for universe " .. universeId .. ", using listed place only.")
-        places[1] = { id = fallbackPlaceId, name = "Main" }
-    end
-    return places
 end
 
 local function needsArchive(state, key, updated)
@@ -96,7 +98,21 @@ local function findPending(state)
         if g.placeId then
             local uid = getUniverseId(state, g.placeId)
             if uid then
-                entries[uid] = { name = g.name or uid, rootPlaceId = g.placeId, universeId = uid }
+                local gname = g.name or uid
+                local places, seen = {}, {}
+                local function add(id, name)
+                    local key = tostring(id)
+                    if not seen[key] then
+                        seen[key] = true
+                        table.insert(places, { id = id, key = key, name = name })
+                    end
+                end
+                add(g.placeId, gname) -- main place always included
+                for _, p in ipairs(state.places[uid] or {}) do
+                    add(p.id, gname .. " - " .. tostring(p.name))
+                end
+
+                entries[uid] = { universeId = uid, places = places }
                 table.insert(ids, uid)
             end
         end
@@ -111,14 +127,13 @@ local function findPending(state)
             for _, info in ipairs(data.data) do
                 local e = entries[tostring(info.id)]
                 if e then
-                    for _, p in ipairs(getPlaces(e.universeId, e.rootPlaceId)) do
-                        local key = tostring(p.id)
-                        if needsArchive(state, key, info.updated) then
+                    for _, p in ipairs(e.places) do
+                        if needsArchive(state, p.key, info.updated) then
                             table.insert(pending, {
-                                name = e.name .. " - " .. p.name,
+                                name = p.name,
                                 placeId = p.id,
                                 universeId = e.universeId,
-                                key = key,
+                                key = p.key,
                                 updated = info.updated,
                             })
                         end
@@ -159,8 +174,10 @@ end
 
 local function cycle()
     local state = loadState()
+    if not game:IsLoaded() then game.Loaded:Wait() end
+    enumeratePlaces(state) -- before findPending so new subplaces count immediately
     local pending = findPending(state)
-    saveState(state) -- keeps the universe cache
+    saveState(state) -- keeps universe + places cache
 
     log(#pending .. " place(s) need archiving.")
 
