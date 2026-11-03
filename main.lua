@@ -5,7 +5,7 @@ local AssetService = game:GetService("AssetService")
 local CONFIG = {
     GamesURL = "https://raw.githubusercontent.com/GamingBoyZ379/thingything/main/games.json",
     ScriptURL = "https://raw.githubusercontent.com/GamingBoyZ379/thingything/main/main.lua",
-    CheckInterval = 300,
+    CheckInterval = 30,
     RequestDelay = 1,
     LoadWait = 15,      -- seconds to let the place stream in before saving
     MaxAttempts = 3,
@@ -169,6 +169,7 @@ local function findPending(state)
     return pending
 end
 
+-- returns true if the save succeeded
 local function archive(state, entry)
     state.attempts[entry.key] = (state.attempts[entry.key] or 0) + 1
     saveState(state) -- persist the attempt before the risky part
@@ -184,7 +185,9 @@ local function archive(state, entry)
         IgnoreDefaultProperties = true,
     })
 
-    if ok and type(path) == "string" then
+    local saved = ok and type(path) == "string"
+
+    if saved then
         -- the save itself succeeded, so mark it archived even if the move below fails
         state.archived[entry.key] = entry.updated
         state.attempts[entry.key] = nil
@@ -199,9 +202,12 @@ local function archive(state, entry)
     else
         warn("[UpdateMonitor] saveinstance failed: " .. tostring(path))
     end
+
     saveState(state)
+    return saved
 end
 
+-- returns true if it archived something (so the main loop can continue immediately)
 local function cycle()
     local state = loadState()
     if not game:IsLoaded() then game.Loaded:Wait() end
@@ -213,9 +219,8 @@ local function cycle()
 
     -- archive the current place if it's pending
     for _, e in ipairs(pending) do
-        if tostring(game.PlaceId) == e.key then
-            archive(state, e)
-            return
+        if tostring(game.PlaceId) == e.key and (state.attempts[e.key] or 0) < CONFIG.MaxAttempts then
+            return archive(state, e)
         end
     end
 
@@ -229,15 +234,19 @@ local function cycle()
             queue_on_teleport(('loadstring(game:HttpGet("%s", true))()'):format(CONFIG.ScriptURL))
             TeleportService:Teleport(e.placeId)
             task.wait(30) -- teleport kills the script; this just stops the loop racing it
-            return
+            return false
         end
     end
+
+    return false
 end
 
 if not isfolder(CONFIG.Dir) then makefolder(CONFIG.Dir) end
 
 while true do
-    local ok, err = pcall(cycle)
-    if not ok then warn("[UpdateMonitor] Cycle error: " .. tostring(err)) end
-    task.wait(CONFIG.CheckInterval)
+    local ok, saved = pcall(cycle)
+    if not ok then warn("[UpdateMonitor] Cycle error: " .. tostring(saved)) end
+    if not (ok and saved == true) then
+        task.wait(CONFIG.CheckInterval)
+    end
 end
