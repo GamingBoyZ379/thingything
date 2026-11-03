@@ -15,6 +15,10 @@ local CONFIG = {
 
 local function log(msg) print("[UpdateMonitor] " .. msg) end
 
+local function cleanName(s)
+    return (tostring(s):gsub("[^%w%-_ ]", ""))
+end
+
 local function fetchJson(url, label)
     local ok, body = pcall(game.HttpGet, game, url, true) -- true = skip Real's response cache
     if not ok then warn("[UpdateMonitor] " .. label .. " failed: " .. tostring(body)) return nil end
@@ -50,6 +54,24 @@ end
 local function toMillis(iso)
     local ok, dt = pcall(DateTime.fromIsoDate, iso)
     return ok and dt and dt.UnixTimestampMillis or nil
+end
+
+-- copy the saved file into SavedInstances/<game>/ and delete the original
+local function moveToGameFolder(path, gameName)
+    local filename = path:match("[^/\\]+$") or path
+    local source
+    for _, candidate in ipairs({ path, filename }) do -- returned path may or may not be workspace-relative
+        if isfile(candidate) then source = candidate break end
+    end
+    if not source then return false, "saved file not found at " .. path end
+
+    local folder = CONFIG.Dir .. "/" .. cleanName(gameName)
+    local ok, err = pcall(function()
+        if not isfolder(folder) then makefolder(folder) end
+        writefile(folder .. "/" .. filename, readfile(source))
+        delfile(source)
+    end)
+    return ok, err, folder .. "/" .. filename
 end
 
 -- cache every place of the game we're currently in
@@ -104,7 +126,7 @@ local function findPending(state)
                     local key = tostring(id)
                     if not seen[key] then
                         seen[key] = true
-                        table.insert(places, { id = id, key = key, name = name })
+                        table.insert(places, { id = id, key = key, name = name, game = gname })
                     end
                 end
                 add(g.placeId, gname) -- main place always included
@@ -131,6 +153,7 @@ local function findPending(state)
                         if needsArchive(state, p.key, info.updated) then
                             table.insert(pending, {
                                 name = p.name,
+                                game = p.game,
                                 placeId = p.id,
                                 universeId = e.universeId,
                                 key = p.key,
@@ -154,18 +177,25 @@ local function archive(state, entry)
     if not game:IsLoaded() then game.Loaded:Wait() end
     task.wait(CONFIG.LoadWait)
 
-    local safeName = entry.name:gsub("[^%w%-_ ]", "")
     local ok, path = pcall(saveinstance, {
-        FileName = ("%s_%s_%s"):format(safeName, entry.key, os.date("%Y%m%d")), -- no slashes
+        FileName = ("%s_%s_%s"):format(cleanName(entry.name), entry.key, os.date("%Y%m%d")), -- no slashes
         Decompile = true,
         scriptcache = true,
         IgnoreDefaultProperties = true,
     })
 
     if ok and type(path) == "string" then
+        -- the save itself succeeded, so mark it archived even if the move below fails
         state.archived[entry.key] = entry.updated
         state.attempts[entry.key] = nil
-        log("Archived " .. entry.name .. " -> " .. path)
+
+        local moved, err, dest = moveToGameFolder(path, entry.game)
+        if moved then
+            log("Archived " .. entry.name .. " -> " .. dest)
+        else
+            warn("[UpdateMonitor] Saved but could not move file: " .. tostring(err))
+            log("Archived " .. entry.name .. " -> " .. path)
+        end
     else
         warn("[UpdateMonitor] saveinstance failed: " .. tostring(path))
     end
