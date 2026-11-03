@@ -108,16 +108,19 @@ local function archive(state, entry)
     task.wait(CONFIG.LoadWait)
 
     local safeName = entry.name:gsub("[^%w%-_ ]", "")
-    local ok, err = pcall(saveinstance, {
-        FileName = ("%s/%s_%s_%s"):format(CONFIG.Dir, safeName, entry.universeId, os.date("%Y%m%d")),
+    local ok, path = pcall(saveinstance, {
+        FileName = ("%s_%s_%s"):format(safeName, entry.universeId, os.date("%Y%m%d")), -- no slashes
+        Decompile = true,
+        scriptcache = true,
+        IgnoreDefaultProperties = true,
     })
 
-    if ok then
+    if ok and type(path) == "string" then
         state.archived[entry.universeId] = entry.updated
         state.attempts[entry.universeId] = nil
-        log("Archived " .. entry.name)
+        log("Archived " .. entry.name .. " -> " .. path)
     else
-        warn("[UpdateMonitor] saveinstance failed: " .. tostring(err))
+        warn("[UpdateMonitor] saveinstance failed: " .. tostring(path))
     end
     saveState(state)
 end
