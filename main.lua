@@ -1,9 +1,11 @@
+
 local HttpService = game:GetService("HttpService")
 
 local CONFIG = {
     GitHubURL = "https://raw.githubusercontent.com/GamingBoyZ379/thingything/main/games.json",
     CheckInterval = 300,
     RequestDelay = 2,
+    SaveDirectory = "SavedInstances",
     SaveFile = "SavedInstances/update_history.json"
 }
 
@@ -11,12 +13,11 @@ local function log(message)
     print("[UpdateMonitor] " .. message)
 end
 
--- Load saved timestamps
 local function loadHistory()
-    log("Loading saved timestamp history...")
+    log("Loading timestamp history...")
 
     if not isfile(CONFIG.SaveFile) then
-        log("No previous history found. Starting fresh.")
+        log("No history found. Starting fresh.")
         return {}
     end
 
@@ -24,28 +25,29 @@ local function loadHistory()
         return HttpService:JSONDecode(readfile(CONFIG.SaveFile))
     end)
 
-    if not success then
-        warn("[UpdateMonitor] Failed to read history: " .. tostring(result))
-        return {}
+    if not success or type(result) ~= "table" then
+        warn("[UpdateMonitor] Could not load history.")
+        return nil
     end
 
-    log("Loaded saved timestamp history.")
+    log("Loaded " .. tostring(#result) .. " history entries.")
     return result
 end
 
--- Save timestamps
 local function saveHistory(history)
-    log("Saving timestamp history...")
+    log("Writing timestamp history...")
 
     local success, err = pcall(function()
         writefile(CONFIG.SaveFile, HttpService:JSONEncode(history))
     end)
 
-    if success then
-        log("Timestamp history saved.")
-    else
-        warn("[UpdateMonitor] Failed to save history: " .. tostring(err))
+    if not success then
+        warn("[UpdateMonitor] History write failed: " .. tostring(err))
+        return false
     end
+
+    log("History saved successfully.")
+    return true
 end
 
 local function request(url, description)
@@ -56,7 +58,7 @@ local function request(url, description)
     end)
 
     if not success then
-        warn("[UpdateMonitor] REQUEST FAILED: " .. tostring(result))
+        warn("[UpdateMonitor] Request failed: " .. tostring(result))
         return nil
     end
 
@@ -65,11 +67,11 @@ local function request(url, description)
 end
 
 local function getUniverseId(placeId)
-    log("Resolving UniverseId for PlaceId " .. placeId)
+    log("Resolving PlaceId: " .. tostring(placeId))
 
     local result = request(
         "https://apis.roblox.com/universes/v1/places/"
-        .. placeId .. "/universe",
+        .. tostring(placeId) .. "/universe",
         "UniverseId lookup"
     )
 
@@ -80,16 +82,16 @@ local function getUniverseId(placeId)
     end)
 
     if not success or not data.universeId then
-        warn("[UpdateMonitor] Invalid UniverseId response")
+        warn("[UpdateMonitor] Invalid UniverseId response.")
         return nil
     end
 
-    log("UniverseId found: " .. data.universeId)
+    log("UniverseId: " .. tostring(data.universeId))
     return tostring(data.universeId)
 end
 
 local function getUpdate(universeId)
-    log("Checking UniverseId " .. universeId)
+    log("Checking UniverseId: " .. universeId)
 
     local result = request(
         "https://games.roblox.com/v1/games?universeIds="
@@ -104,11 +106,27 @@ local function getUpdate(universeId)
     end)
 
     if not success or not data.data or not data.data[1] then
-        warn("[UpdateMonitor] No experience information returned")
+        warn("[UpdateMonitor] No experience information returned.")
         return nil
     end
 
     return data.data[1].updated
+end
+
+local function parseTimestamp(value)
+    if type(value) ~= "string" then
+        return nil
+    end
+
+    local success, date = pcall(function()
+        return DateTime.fromIsoDate(value)
+    end)
+
+    if not success or not date then
+        return nil
+    end
+
+    return date.UnixTimestampMillis
 end
 
 local function checkGames()
@@ -123,13 +141,14 @@ local function checkGames()
     end)
 
     if not success or type(games) ~= "table" then
-        warn("[UpdateMonitor] Invalid GitHub JSON")
+        warn("[UpdateMonitor] Invalid GitHub JSON.")
         return
     end
 
-    log("Found " .. #games .. " games")
+    log("Found " .. #games .. " games.")
 
     local history = loadHistory()
+    if not history then return end
 
     for index, gameInfo in ipairs(games) do
         log("----------------------------------------")
@@ -137,58 +156,66 @@ local function checkGames()
         log("Name: " .. tostring(gameInfo.name))
 
         if not gameInfo.placeId then
-            warn("[UpdateMonitor] Missing PlaceId")
+            warn("[UpdateMonitor] Missing PlaceId.")
             continue
         end
 
         local universeId = getUniverseId(gameInfo.placeId)
-
         if not universeId then
-            log("Skipping: UniverseId unavailable")
+            log("Skipping: UniverseId unavailable.")
             continue
         end
 
         local updated = getUpdate(universeId)
-
         if not updated then
-            log("Skipping: Update timestamp unavailable")
+            log("Skipping: Update timestamp unavailable.")
             continue
         end
 
         local previous = history[universeId]
 
         if not previous then
-            log("NEW GAME: No saved timestamp exists.")
-            history[universeId] = updated
-
-        elseif previous ~= updated then
-            log("UPDATE DETECTED!")
-            log("Previous: " .. tostring(previous))
-            log("Current:  " .. tostring(updated))
-
-            history[universeId] = updated
+            log("NEW: No previously recorded archive.")
+            log("Current update: " .. updated)
+            log("Needs archive: YES")
 
         else
-            log("UNCHANGED: No new update.")
+            local currentTime = parseTimestamp(updated)
+            local previousTime = parseTimestamp(previous)
+
+            if not currentTime or not previousTime then
+                warn("[UpdateMonitor] Invalid timestamp. Skipping comparison.")
+
+            elseif currentTime > previousTime then
+                log("UPDATE DETECTED!")
+                log("Previous: " .. previous)
+                log("Current: " .. updated)
+                log("Needs archive: YES")
+
+            else
+                log("UNCHANGED: No newer update.")
+                log("Needs archive: NO")
+            end
         end
 
         task.wait(CONFIG.RequestDelay)
     end
 
-    saveHistory(history)
-
-    log("Finished checking all games")
+    log("Finished checking all games.")
     log("========================================")
 end
 
--- Create storage folder
-if not isfolder("SavedInstances") then
-    makefolder("SavedInstances")
+if not isfolder(CONFIG.SaveDirectory) then
+    makefolder(CONFIG.SaveDirectory)
 end
 
 while true do
-    checkGames()
+    local success, err = pcall(checkGames)
 
-    log("Next check in " .. CONFIG.CheckInterval .. " seconds")
+    if not success then
+        warn("[UpdateMonitor] Cycle error: " .. tostring(err))
+    end
+
+    log("Next check in " .. CONFIG.CheckInterval .. " seconds.")
     task.wait(CONFIG.CheckInterval)
 end
