@@ -8,7 +8,7 @@ local CONFIG = {
     CheckInterval = 30,
     RequestDelay = 1,
     LoadWait = 15,      -- seconds to let the place stream in before saving
-    MaxAttempts = 3,
+    MaxAttempts = 2,
     Dir = "SavedInstances",
     StateFile = "SavedInstances/state.json",
 }
