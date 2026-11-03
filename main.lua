@@ -15,7 +15,7 @@ local CONFIG = {
 local function log(msg) print("[UpdateMonitor] " .. msg) end
 
 local function fetchJson(url, label)
-    local ok, body = pcall(game.HttpGet, game, url)
+    local ok, body = pcall(game.HttpGet, game, url, true) -- true = skip Real's response cache
     if not ok then warn("[UpdateMonitor] " .. label .. " failed: " .. tostring(body)) return nil end
     local ok2, data = pcall(HttpService.JSONDecode, HttpService, body)
     if not ok2 then warn("[UpdateMonitor] " .. label .. " bad JSON") return nil end
@@ -146,7 +146,8 @@ local function cycle()
             state.attempts[e.universeId] = (state.attempts[e.universeId] or 0) + 1
             saveState(state)
             log("Teleporting to " .. e.name)
-            queue_on_teleport(('loadstring(game:HttpGet("%s"))()'):format(CONFIG.ScriptURL))
+            clear_teleport_queue() -- avoid stacked copies if a previous teleport failed
+            queue_on_teleport(('loadstring(game:HttpGet("%s", true))()'):format(CONFIG.ScriptURL))
             TeleportService:Teleport(e.placeId)
             task.wait(30) -- teleport kills the script; this just stops the loop racing it
             return
