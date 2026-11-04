@@ -1,4 +1,4 @@
-$file = "C:\Users\jjlev\AppData\Local\Real\workspace\SavedInstances\next.txt"
+$file = Join-Path $PSScriptRoot "next.txt"   # looks in the same folder as launcher.ps1
 $key  = 'Registry::HKEY_CLASSES_ROOT\roblox\shell\open\command'
 $restartPlace = "9087381198"   # where to relaunch after a crash
 $grace = 90                    # seconds to wait after any launch before the crash check applies
@@ -25,6 +25,8 @@ function Launch($id) {
     Write-Host "Using $exe"
     Start-Process $exe -ArgumentList "roblox://experiences/start?placeId=$id"
 }
+
+Write-Host "Watching $file"
 
 $lastLaunch = Get-Date
 $missing = 0
