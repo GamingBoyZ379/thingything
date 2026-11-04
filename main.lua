@@ -159,7 +159,8 @@ local function findPending(state)
                 local e = entries[tostring(info.id)]
                 if e then
                     for _, p in ipairs(e.places) do
-                        if needsArchive(state, p.key, info.updated) then
+                        if needsArchive(state, p.key, info.updated)
+                        and (state.attempts[p.key] or 0) < CONFIG.MaxAttempts then
                             table.insert(pending, {
                                 name = p.name,
                                 game = p.game,
